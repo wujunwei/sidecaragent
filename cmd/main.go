@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"github.com/wujunwei/sidecaragent/pkg/graceful"
 	"github.com/wujunwei/sidecaragent/pkg/httpserver"
-	"github.com/wujunwei/sidecaragent/pkg/util"
+	"log"
+	"net/http"
 	"os"
 )
 
 var (
-	listen          string
+	address         string
+	innerAddress    string
 	appName         string
 	callbackAddress string
 	appSecret       string
@@ -21,10 +23,9 @@ var (
 	key             string
 )
 
-var log = util.Logger.Named("main")
-
 func init() {
-	flag.StringVar(&listen, "listen", ":80", "the host(ip) and port for listening")
+	flag.StringVar(&address, "address", ":80", "the host(ip) and port for the forward proxy")
+	flag.StringVar(&innerAddress, "innerAddress", "127.0.0.1:808", "the host(ip) and port for inner service")
 	flag.StringVar(&appName, "name", "app", "the name of this application")
 	flag.StringVar(&callbackAddress, "upstream", "127.0.0.1:8080", "the upstream of this agent")
 	flag.StringVar(&appSecret, "secret", "", "the client secret of this application")
@@ -47,23 +48,32 @@ func checkFlag() error {
 func main() {
 	flag.Parse()
 	if err := checkFlag(); err != nil {
-		log.Error(err)
+		log.Println(err)
 		os.Exit(1)
 	}
 	stop := graceful.SetupSignalHandler()
-	server := httpserver.NewServer(listen)
-	go func() {
-		<-stop
-		log.Infof("server start to stop.")
-		_ = server.Shutdown(context.Background())
-	}()
+	forwardProxy := httpserver.NewForwardProxy(address)
+	reverseProxy := httpserver.NewReverseProxy(innerAddress)
 	var err error
-	if enableTLS {
-		err = server.ListenAndServeTLS(cert, key)
-	} else {
-		err = server.ListenAndServe()
-	}
-	if err != nil {
-		log.Error(err)
-	}
+	go func() {
+		if enableTLS {
+			err = forwardProxy.ListenAndServeTLS(cert, key)
+		} else {
+			err = forwardProxy.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+	go func() {
+		err = reverseProxy.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-stop
+	log.Println("server start to stop.")
+	_ = reverseProxy.Shutdown(context.Background())
+	_ = forwardProxy.Shutdown(context.Background())
 }
